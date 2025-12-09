@@ -44,13 +44,26 @@ class Message:
 # Get user_id:
 if "session_id" not in st.session_state:
 
-    try:
-        if requests.get(f"{st.secrets.server.ip_address}/").status_code != 200:
-            raise Exception
-    except:
-        st.error(
-            "Server is not reachable. Please check your connection or server status.", icon="🚫"
-        )
+    # Check server availability with retries
+    max_retries = 5
+    retry_delay = 2  # seconds
+    server_ready = False
+
+    for attempt in range(max_retries):
+        try:
+            if requests.get(f"{st.secrets.server.ip_address}/", timeout=5).status_code == 200:
+                server_ready = True
+                break
+        except:
+            if attempt < max_retries - 1:
+                st.info(f"🔄 Initializing services... ({attempt + 1}/{max_retries})")
+                time.sleep(retry_delay)
+            else:
+                st.error("Server is not reachable. Please check your connection or server status.", icon="🚫")
+                st.stop()
+
+    if not server_ready and max_retries > 0:
+        st.error("Failed to connect to server after retries.", icon="🚫")
         st.stop()
 
     # with st.container(border=True, height=500):
