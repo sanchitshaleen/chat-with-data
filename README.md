@@ -292,22 +292,3 @@ In [`./server/llm_system/core/database.py`](./server/llm_system/core/database.py
 ## Port Already in Use
 - **Solution**: Either stop the conflicting service or change ports in `docker-compose.yml`
 
-
-# 🚀 Future Work
-- Add support for more file formats (DOCX, PPTX, Excel, etc.)
-- Implement web-based URL loading for querying websites on-the-fly
-- Add multi-user collaboration features
-- Implement document versioning and change tracking
-- Add export functionality for conversations and summaries
-- Support for chunk-level relevance scoring and transparency
-
-
-# 🤝 Contributions 
-Any contributions or suggestions are welcome!
-
-# 📜 License
-[![Code-License](https://img.shields.io/badge/License%20-GNU%20--%20GPL%20v3.0-blue.svg?logo=GNU)](https://www.gnu.org/licenses/gpl-3.0)
-- This project is licensed under the `GNU General Public License v3.0`
-- See the [LICENSE](LICENSE) file for details.
-- You can use the code with proper credits to the author.
-
