@@ -439,8 +439,13 @@ if st.sidebar.button("Clear My Uploads", type="secondary", icon="🗑️"):
             data={"user_id": user_id}
         )
         if resp.status_code == 200:
-            st.success(resp.json().get("message", "Uploads cleared successfully!"), icon="✅")
-            st.cache_data.clear()
+            # Refresh the file list after clearing
+            st.session_state.user_uploads = requests.get(
+                f"{st.session_state.server_ip}/uploads",
+                params={"user_id": user_id}
+            ).json().get("files", [])
+            st.success("Uploads cleared successfully!", icon="✅")
+            st.rerun()
         else:
             st.error(resp.json().get("error", "Failed to clear Uploads."), icon="🚫")
     except requests.RequestException as e:

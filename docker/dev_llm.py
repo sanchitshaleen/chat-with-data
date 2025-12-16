@@ -6,6 +6,7 @@ Also contains dummy response generators for testing purposes.
 from time import sleep
 from random import choice
 from typing import Generator
+import os
 
 from langchain_ollama import ChatOllama
 from langchain_core.output_parsers import StrOutputParser
@@ -30,8 +31,14 @@ def get_llm(model_name: str, context_size: int,
     """
 
     log.info(f"Initializing LLM(model={model_name}, ctx_size={context_size}, temp={temperature})")
+    
+    # Determine Ollama base URL - use service name in Docker, localhost for dev
+    ollama_host = os.getenv("OLLAMA_HOST", "ollama")  # Default to Docker service name
+    ollama_port = os.getenv("OLLAMA_PORT", "11434")
+    base_url = f"http://{ollama_host}:{ollama_port}"
+    
     model = ChatOllama(
-        base_url="http://host.docker.internal:11434",  # Use host's IP for Docker
+        base_url=base_url,
         model=model_name, num_ctx=context_size, temperature=temperature, keep_alive=-1
     )
 

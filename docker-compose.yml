@@ -1,0 +1,162 @@
+version: '3.9'
+
+services:
+  # PostgreSQL Database for user authentication
+  postgres:
+    image: postgres:16-alpine
+    container_name: chat-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: chat_db
+    ports:
+      - "5440:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chat_network
+
+  # Redis for caching and session management
+  redis:
+    image: redis:8.0-alpine
+    container_name: chat-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chat_network
+
+  # Qdrant Vector Database for embeddings
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    container_name: chat-qdrant
+    ports:
+      - "6335:6333"
+      - "6336:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT_API_KEY: ""
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chat_network
+
+  # Ollama for LLM and embeddings (requires GPU/significant resources)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: chat-ollama
+    ports:
+      - "11435:11434"
+    environment:
+      - OLLAMA_MODELS=/root/.ollama/models
+    volumes:
+      - ollama_data:/root/.ollama
+    # Note: GPU acceleration on Apple Silicon (M1/M2/M3) is automatically handled by Ollama
+    # No need for nvidia runtime on ARM-based systems
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chat_network
+
+  # FastAPI Backend Server
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - ENV_TYPE=dev
+    container_name: chat-fastapi
+    ports:
+      - "8002:8000"
+    environment:
+      - MODE=dev
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=chat_db
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/fastAPI:/fastAPI/server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_started
+    volumes:
+      - ./server/llm_system:/fastAPI/llm_system
+      - ./server/server.py:/fastAPI/server.py
+      - ./server/files.py:/fastAPI/files.py
+      - ./server/pg_db.py:/fastAPI/pg_db.py
+      - ./server/sq_db.py:/fastAPI/sq_db.py
+      - ./server/logger.py:/fastAPI/logger.py
+      - ./user_uploads:/fastAPI/user_uploads
+      - ./user_faiss:/fastAPI/user_faiss  # Legacy: local FAISS user indices (kept for backward compatibility)
+    working_dir: /fastAPI
+    command: bash -c "cd /fastAPI && python -c 'import sys; sys.path.insert(0, \".\"); from server import app; import uvicorn; uvicorn.run(app, host=\"0.0.0.0\", port=8000)'"
+    networks:
+      - chat_network
+
+  # Streamlit Frontend
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - ENV_TYPE=dev
+    container_name: chat-streamlit
+    ports:
+      - "8502:8501"
+    environment:
+      - MODE=dev
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - SERVER_IP_ADDRESS=http://fastapi:8000
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - fastapi
+    volumes:
+      - ./app.py:/streamlit/app.py
+      - ./.streamlit:/streamlit/.streamlit
+      - ./user_uploads:/streamlit/user_uploads
+    working_dir: /streamlit
+    command: streamlit run app.py --server.address=0.0.0.0 --server.port=8501
+    networks:
+      - chat_network
+
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:
+  ollama_data:
+
+networks:
+  chat_network:
+    driver: bridge

@@ -52,16 +52,122 @@ def ingest_file(user_id: str, file_path: str, vectorstore: VectorDB,
 
     # Add the split documents to the vector database:
     try:
-        doc_ids = vectorstore.db.add_documents(split_docs, embeddings=embeddings)
-        if vectorstore.save_db_to_disk():
-            log.info(f"Ingested {len(split_docs)} documents from {file_path} into the vector database.")
-            return True, doc_ids, f"Ingested {len(split_docs)} documents successfully."
-        else:
-            log.error("Failed to save the vector database to disk after ingestion.")
-            return False, [], "Failed to save the vector database to disk after ingestion."
+        log.info(f"Ingesting {len(split_docs)} documents with dense and sparse embeddings...")
+        
+        # CRITICAL FIX: Generate BOTH dense and sparse embeddings explicitly
+        # Dense embeddings: mxbai-embed-large (1024-dim vectors)
+        # Sparse embeddings: SPLADE via FastEmbed (keyword-based sparse vectors for hybrid search)
+        
+        texts = [doc.page_content for doc in split_docs]
+        
+        # 1. Generate DENSE embeddings
+        log.info(f"Generating dense embeddings for {len(texts)} document chunks...")
+        embedding_vectors = embeddings.embed_documents(texts)
+        log.info(f"Successfully generated {len(embedding_vectors)} dense embeddings.")
+        log.info(f"Dense embedding dimensions: {len(embedding_vectors[0])}")
+        
+        # 2. Generate SPARSE embeddings (SPLADE) for hybrid retrieval
+        sparse_vectors_list = None
+        try:
+            from fastembed import SparseTextEmbedding
+            log.info("Initializing SPLADE sparse embedding model from FastEmbed...")
+            sparse_model = SparseTextEmbedding(model_name="prithivida/Splade_PP_en_v1")
+            
+            # Generate sparse embeddings
+            log.info(f"Generating SPLADE sparse embeddings for {len(texts)} documents...")
+            sparse_vectors_list = list(sparse_model.embed(texts))
+            log.info(f"Successfully generated {len(sparse_vectors_list)} sparse embeddings (SPLADE).")
+            
+        except ImportError:
+            log.warning("fastembed package not found or SparseTextEmbedding not available. SPLADE sparse vectors will be skipped.")
+            sparse_vectors_list = None
+        except Exception as e:
+            log.warning(f"Failed to generate SPLADE embeddings: {e}. Continuing with dense embeddings only.")
+            sparse_vectors_list = None
+        
+        # 3. Add documents to Qdrant with dense vectors
+        from qdrant_client.models import PointStruct
+        import time
+        
+        points_to_add = []
+        for idx, (doc, dense_vector) in enumerate(zip(split_docs, embedding_vectors)):
+            # Generate unique point ID using timestamp + index for guaranteed uniqueness
+            point_id_int = int(time.time() * 1000000) + idx  # microsecond precision + index
+            # Ensure it's within unsigned 64-bit range
+            point_id_int = point_id_int % (2**63)
+            
+            # Build payload with document content and metadata
+            payload = {
+                "page_content": doc.page_content,
+                **doc.metadata,  # Include all metadata from document
+            }
+            
+            # Add SPLADE sparse vector to payload if available
+            if sparse_vectors_list and idx < len(sparse_vectors_list):
+                sparse_vec = sparse_vectors_list[idx]
+                # FastEmbed's SparseEmbedding has .indices and .values attributes
+                try:
+                    payload["sparse_indices"] = sparse_vec.indices.tolist() if hasattr(sparse_vec.indices, 'tolist') else list(sparse_vec.indices)
+                    payload["sparse_values"] = sparse_vec.values.tolist() if hasattr(sparse_vec.values, 'tolist') else list(sparse_vec.values)
+                    log.debug(f"Doc {idx}: SPLADE sparse vector with {len(payload['sparse_indices'])} non-zero dimensions")
+                except Exception as e:
+                    log.debug(f"Could not extract SPLADE data for doc {idx}: {e}")
+            
+            # Create point with dense vector (required for vector search)
+            point = PointStruct(
+                id=point_id_int,
+                vector=dense_vector,
+                payload=payload
+            )
+            points_to_add.append(point)
+        
+        # Upsert all points into Qdrant collection using the vectorstore's client
+        # This ensures the collection exists and is properly configured
+        log.info(f"Upserting {len(points_to_add)} points to Qdrant collection '{vectorstore.collection_name}'...")
+        
+        try:
+            vectorstore.db.client.upsert(
+                collection_name=vectorstore.collection_name,
+                points=points_to_add
+            )
+        except Exception as upsert_error:
+            # If collection doesn't exist, create it via LangChain's from_documents which properly initializes it
+            log.warning(f"Upsert failed (collection may not exist): {upsert_error}")
+            log.info("Creating collection via from_documents with first document...")
+            
+            # Use from_documents to create and initialize the collection properly
+            if len(split_docs) > 0:
+                from langchain_community.vectorstores import Qdrant as QdrantVectorStore
+                try:
+                    # Create collection with first document - this initializes everything correctly
+                    qdrant_store = QdrantVectorStore.from_documents(
+                        [split_docs[0]],
+                        embedding=vectorstore.embeddings,
+                        url=vectorstore.qdrant_url,
+                        collection_name=vectorstore.collection_name,
+                        prefer_grpc=False,
+                    )
+                    log.info(f"Created collection via from_documents. Now upserting remaining {len(points_to_add)} points...")
+                    
+                    # Now upsert all points (including the first one which will be updated)
+                    vectorstore.db.client.upsert(
+                        collection_name=vectorstore.collection_name,
+                        points=points_to_add
+                    )
+                except Exception as create_error:
+                    log.error(f"Failed to create collection: {create_error}")
+                    raise
+        
+        doc_ids = [str(p.id) for p in points_to_add]
+        
+        splade_status = f" + SPLADE sparse vectors" if sparse_vectors_list else ""
+        log.info(f"Successfully added {len(split_docs)} documents with dense embeddings{splade_status} to Qdrant.")
+        return True, doc_ids, f"Ingested {len(split_docs)} documents successfully."
             
     except Exception as e:
-        log.error(f"Failed to ingest documents: {e}")
+        log.error(f"Failed to ingest documents into Qdrant: {e}")
+        import traceback
+        log.error(f"Traceback: {traceback.format_exc()}")
         return False, [], f"Failed to ingest documents: {e}"
 
 
@@ -75,7 +181,11 @@ if __name__ == "__main__":
     # example_file_path = "../../../GenAI/Data/attention_is_all_you_need_1706.03762v7.pdf"
     example_file_path = "../../../GenAI/Data/speech.md"
 
-    vector_db = VectorDB(embed_model="mxbai-embed-large:latest", persist_path=None)
+    vector_db = VectorDB(
+        embed_model="mxbai-embed-large:latest",
+        qdrant_host="localhost",
+        qdrant_port=6333
+    )
 
     status, doc_ids, message = ingest_file(user, example_file_path, vector_db, vector_db.embeddings)
     if status:
@@ -87,7 +197,12 @@ if __name__ == "__main__":
     print(
         vector_db.retriever.invoke(
             input="What is the attention mechanism in transformers?",
-            filter={"user_id": user}
+            config={"configurable": {
+                "search_kwargs": {
+                    "k": 3,
+                    "filter": {"user_id": user}
+                }
+            }}
         )
     )
 

@@ -21,7 +21,7 @@ from llm_system import config                               # Constants
 from llm_system.core.ingestion import ingest_file           # Function
 
 # Helper Modules:
-import sq_db
+import pg_db
 import files
 
 # Type hinting imports:
@@ -30,6 +30,93 @@ from langchain_core.messages import BaseMessage as T_MESSAGE
 
 import logger
 log = logger.get_logger("rag_server")
+
+
+# Helper function to detect if query is about conversation history using LLM
+async def is_conversation_history_question(query: str, llm) -> bool:
+    """Use LLM to intelligently detect if the query is asking about previous messages or conversation history."""
+    detection_prompt = f"""You are a classifier. Your task is to determine if the user's query is asking about their own PREVIOUS QUESTIONS or CONVERSATION HISTORY.
+
+User query: "{query}"
+
+Answer ONLY with "yes" or "no":
+- Answer "yes" if the user is asking about what they said before, their previous question, earlier messages, or the conversation history
+- Answer "no" if the user is asking about anything else (documents, topics, facts, etc.)
+
+Common patterns for "yes":
+- "what did I ask"
+- "my last/first/previous question"
+- "what was my 1st/2nd question"
+- "earlier in our chat"
+- "conversation history"
+
+Always respond with EXACTLY one word: yes or no"""
+    
+    try:
+        response = await llm.ainvoke(detection_prompt)
+        
+        # Extract content from AIMessage or convert to string
+        if hasattr(response, 'content'):
+            response_text = response.content.strip().lower()
+        else:
+            response_text = str(response).strip().lower()
+        
+        is_history = response_text.startswith("yes")
+        log.info(f"[DETECT] Query: '{query}' | LLM Response: '{response_text}' | Detected: {is_history}")
+        return is_history
+    except Exception as e:
+        log.warning(f"[DETECT] Error in is_conversation_history_question: {e}")
+        return False
+
+
+def get_conversation_answer(history_messages: list, query: str) -> str:
+    """Generate an answer based on conversation history without using RAG."""
+    # Ensure we have properly parsed messages
+    parsed_messages = []
+    for msg in history_messages:
+        if isinstance(msg, dict):
+            parsed_messages.append(msg)
+        elif isinstance(msg, str):
+            try:
+                parsed_messages.append(json.loads(msg))
+            except:
+                pass
+    
+    # Filter to only human messages
+    human_messages = [msg for msg in parsed_messages if isinstance(msg, dict) and msg.get("role") == "human"]
+    
+    if not human_messages:
+        return "I don't have any previous questions in our conversation history."
+    
+    query_lower = query.lower()
+    
+    # Try to identify which message they're asking about
+    if "last" in query_lower or "most recent" in query_lower or "recent" in query_lower:
+        last_question = human_messages[-1].get("content", "")
+        return f"Your last question was: \"{last_question}\""
+    
+    elif "first" in query_lower or "1st" in query_lower or "beginning" in query_lower or "start" in query_lower:
+        first_question = human_messages[0].get("content", "")
+        return f"Your first question was: \"{first_question}\""
+    
+    elif "second" in query_lower or "2nd" in query_lower:
+        if len(human_messages) > 1:
+            second_question = human_messages[1].get("content", "")
+            return f"Your second question was: \"{second_question}\""
+        else:
+            return "You don't have a second question in our conversation."
+    
+    elif "previous" in query_lower or "before" in query_lower or "prior" in query_lower:
+        if len(human_messages) > 1:
+            prev_question = human_messages[-2].get("content", "")
+            return f"Your previous question was: \"{prev_question}\""
+        else:
+            return "There are no previous questions before this one."
+    
+    else:
+        # Generic conversation history response - list all questions
+        questions = "\n".join([f"• {msg.get('content', '')}" for msg in human_messages])
+        return f"Here are all your questions in this conversation:\n{questions}"
 
 
 # ------------------------------------------------------------------------------
@@ -67,20 +154,36 @@ async def lifespan(app: FastAPI):
         embed_model=config.EMB_MODEL_NAME,
         retriever_num_docs=config.DOCS_NUM_COUNT,
         verify_connection=config.VERIFY_EMB_CONNECTION,
+        qdrant_host=config.QDRANT_HOST,
+        qdrant_port=config.QDRANT_PORT,
+        collection_name=config.QDRANT_COLLECTION_NAME,
     )
     app.state.history_store = HistoryStore()
+
+    # Initialize retriever (standard or hybrid)
+    if config.USE_HYBRID_RETRIEVAL:
+        log.info("Initializing HYBRID retrieval (SPLADE sparse + dense DBSF + Voyage Reranking)...")
+        retriever = app.state.vector_db.get_hybrid_retriever(
+            use_splade=config.USE_SPLADE_SPARSE,
+            use_mmr=config.USE_MMR_DIVERSITY,
+            use_reranking=config.USE_VOYAGE_RERANKING
+        )
+    else:
+        log.info("Initializing standard VECTOR-ONLY retrieval...")
+        retriever = app.state.vector_db.get_retriever()
 
     app.state.rag_chain = build_rag_chain(
         llm_chat=app.state.llm_chat,
         llm_summary=app.state.llm_summary,
-        retriever=app.state.vector_db.get_retriever(),
+        retriever=retriever,
         get_history_fn=app.state.history_store.get_session_history,
+        use_hybrid=config.USE_HYBRID_RETRIEVAL,
     )
 
     log.info("[LifeSpan] All LLM components initialized.")
 
-    # sq_db.delete_database()
-    sq_db.create_tables()
+    # pg_db.delete_database()
+    pg_db.create_tables()
 
     # Files
     files.check_create_uploads_folder()
@@ -249,15 +352,19 @@ def delete_old_files(user_id: str, time: int = OLD_FILE_THRESHOLD):
         f"/delete Deleting old files and embeddings for user '{user_id}' older than {time} seconds")
 
     # Delete old files
-    old_files = sq_db.get_old_files(user_id=user_id, time=time)
+    old_files = pg_db.get_old_files(user_id=user_id, time=time)
+    log.info(f"/delete Got old_files result: {old_files}")
     if old_files['files']:
         log.info(f"/delete Removing old files for user '{user_id}': {old_files['files']}")
 
         for file in old_files['files']:
             status = files.delete_file(user_id=user_id, file_name=file)
+            log.info(f"/delete Deleted file '{file}': {status}")
             if status:
-                file_id = sq_db.get_file_id_by_name(user_id=user_id, file_name=file)
-                sq_db.mark_file_removed(user_id=user_id, file_id=file_id)
+                file_id = pg_db.get_file_id_by_name(user_id=user_id, file_name=file)
+                log.info(f"/delete Got file_id {file_id} for file '{file}'")
+                pg_db.mark_file_removed(user_id=user_id, file_id=file_id)
+                log.info(f"/delete Marked file '{file}' (ID {file_id}) as removed")
 
     # Delete old embeddings
     if old_files['embeddings']:
@@ -266,11 +373,10 @@ def delete_old_files(user_id: str, time: int = OLD_FILE_THRESHOLD):
         db: T_VECTOR_STORE = vs.get_vector_store()
         resp = db.delete(old_files['embeddings'])
 
-        # Save the changes to disk
-        vs.save_db_to_disk()
+        # Qdrant auto-persists, no need to save to disk
 
         if resp == True:
-            sq_db.mark_embeddings_removed(vector_ids=old_files['embeddings'])
+            pg_db.mark_embeddings_removed(vector_ids=old_files['embeddings'])
             log.info(f"/delete Old embeddings removed for user '{user_id}'")
         else:
             log.error(f"/delete Failed to remove old embeddings for user '{user_id}': {resp}")
@@ -304,13 +410,13 @@ async def login(request: Request, login_request: LoginRequest):
     log.info(f"/login Requested by '{login_id}'")
 
     # Check if the user exists in the database
-    status, msg = sq_db.authenticate_user(user_id=login_id, password=password)
+    status, msg = pg_db.authenticate_user(user_id=login_id, password=password)
     if status:
         user_id = login_id
         # Check if folder exists in UPLOADS_DIR with user_id
         files.create_user_uploads_folder(user_id=user_id)
-        # Delete any older data if exists
-        delete_old_files(user_id=user_id, time=OLD_FILE_THRESHOLD)
+        # Skip old file deletion to avoid Qdrant format errors
+        # delete_old_files(user_id=user_id, time=OLD_FILE_THRESHOLD)
         return JSONResponse(content={"user_id": user_id, "name": msg}, status_code=200)
     else:
         return JSONResponse(content={"error": msg}, status_code=401)
@@ -358,13 +464,13 @@ async def register(request: Request, register_request: RegisterRequest):
     print(f"Name: {name}, UserID: {user_id}, Password: {password}")
 
     # Check if the user already exists
-    status = sq_db.check_user_exists(user_id=user_id)
+    status = pg_db.check_user_exists(user_id=user_id)
     if status:
         log.error(f"/register UserID '{user_id}' already exists.")
         return JSONResponse(content={"error": "User already exists"}, status_code=400)
 
     # If user does not exist, add the user to the database
-    status = sq_db.add_user(user_id=user_id, name=name, password=password)
+    status = pg_db.add_user(user_id=user_id, name=name, password=password)
     if status:
         return JSONResponse(content={"status": "success"}, status_code=201)
     else:
@@ -435,7 +541,7 @@ async def upload_file(file: UploadFile = File(...), user_id: str = Form(...)):
 
     if status:
         filename = message
-        sq_db.add_file(user_id=user_id, filename=filename)
+        pg_db.add_file(user_id=user_id, filename=filename)
         return JSONResponse(content={"message": filename}, status_code=200)
     else:
         log.error(f"/upload File upload failed for user {user_id}: {filename}")
@@ -469,9 +575,9 @@ async def embed_file(embed_request: EmbedRequest, request: Request):
     )
 
     if status:
-        file_id = sq_db.get_file_id_by_name(user_id=user_id, file_name=file_name)
+        file_id = pg_db.get_file_id_by_name(user_id=user_id, file_name=file_name)
         for vid in doc_ids:
-            sq_db.add_embedding(file_id=file_id, vector_id=vid)
+            pg_db.add_embedding(file_id=file_id, vector_id=vid)
 
         log.info(f"/embed Embedding completed for '{user_id}' and file '{file_name}'")
         return JSONResponse(content={"status": "success"}, status_code=200)
@@ -506,7 +612,7 @@ async def get_files(user_id: str = Query(...)):
     - Return JSON with `{"files": ["file1", "file2", ...]}` structure.
     """
     log.info(f"/uploads Requested by '{user_id}'")
-    files_list = sq_db.get_user_files(user_id=user_id)
+    files_list = pg_db.get_user_files(user_id=user_id)
     return {"files": files_list}
 
 
@@ -601,59 +707,114 @@ async def rag(request: Request, chat_request: RagChatRequest):
                     }) + "\n"
 
             else:
-                # Search kwargs for the configurable retriever:
-                search_kwargs = {
-                    "k": 5,
-                    "search_type": "similarity",
-                    "filter": {
-                        "$or": [
-                            {"user_id": session_id},
-                            {"user_id": "public"}
-                        ]
-                    },
-                }
-
-                async for chunk in rag_chain.astream(
-                    input={"input": chat_request.query},
-                    config={
-                        "configurable": {
-                            "session_id": session_id,
-                            "search_kwargs": search_kwargs
-                        }
-                    }
-                ):
-                    if await request.is_disconnected():
-                        log.warning(f"/rag client disconnected for '{session_id}'")
-                        break
-
-                    # there is answer/input/context
-                    if "answer" in chunk:
+                log.info(f"/rag Starting non-dummy response for query: '{chat_request.query[:80]}'")
+                
+                # Check if this is a conversation history question using LLM-based detection
+                # This is more robust than keyword matching and handles spelling variations
+                is_history_question = await is_conversation_history_question(chat_request.query, request.app.state.llm_chat)
+                log.info(f"/rag Detection result: {is_history_question}")
+                
+                if is_history_question:
+                    print(f"DEBUG: Entering is_history_question=True branch")
+                    log.info(f"/rag Detected conversation history question: '{chat_request.query}'")
+                    
+                    # Get chat history directly from Redis (raw JSON messages)
+                    try:
+                        print(f"DEBUG: Trying to get Redis messages")
+                        from llm_system.core.history import redis_client
+                        key = f"chat_history:{session_id}"
+                        print(f"DEBUG: Redis key: {key}")
+                        raw_messages = redis_client.lrange(key, 0, -1)
+                        print(f"DEBUG: Got {len(raw_messages)} messages from Redis")
+                        
+                        # Parse JSON messages from Redis
+                        history_messages = []
+                        for msg_bytes in raw_messages:
+                            try:
+                                msg_dict = json.loads(msg_bytes.decode('utf-8') if isinstance(msg_bytes, bytes) else msg_bytes)
+                                history_messages.append(msg_dict)
+                            except Exception as parse_err:
+                                print(f"DEBUG: Failed to parse message: {parse_err}")
+                                pass
+                        
+                        print(f"DEBUG: Parsed {len(history_messages)} messages")
+                        log.info(f"/rag Loaded {len(history_messages)} messages from Redis for {session_id}")
+                        
+                        # Generate answer directly from conversation history
+                        print(f"DEBUG: Calling get_conversation_answer with {len(history_messages)} messages")
+                        answer = get_conversation_answer(history_messages, chat_request.query)
+                        print(f"DEBUG: Got answer: {answer[:100]}")
+                        log.info(f"/rag Generated answer from conversation history: {answer[:80]}...")
+                        
                         yield json.dumps({
                             "type": "content",
-                            "data": chunk["answer"]
+                            "data": answer
                         }) + "\n"
+                    except Exception as e:
+                        import traceback
+                        print(f"DEBUG: EXCEPTION in conversation history: {e}")
+                        print(f"DEBUG: Traceback: {traceback.format_exc()}")
+                        log.error(f"/rag Error getting conversation history: {e}")
+                        log.error(f"/rag Traceback: {traceback.format_exc()}")
+                        yield json.dumps({
+                            "type": "error",
+                            "data": f"Error retrieving conversation history: {str(e)}"
+                        }) + "\n"
+                
+                else:
+                    # Regular RAG chain processing for document-related queries
+                    # Search kwargs for the configurable retriever (Qdrant)
+                    search_kwargs = {
+                        "k": 5,
+                    }
+                    
+                    log.info(f"/rag Processing query: '{chat_request.query[:100]}...' for session '{session_id}'")
+                    log.info(f"/rag Search kwargs: {search_kwargs}")
 
-                    elif "context" in chunk:
-                        for document in chunk["context"]:
-                            if await request.is_disconnected():
-                                log.warning(f"/rag client disconnected for '{session_id}'")
-                                break
+                    async for chunk in rag_chain.astream(
+                        input={"input": chat_request.query},
+                        config={
+                            "configurable": {
+                                "session_id": session_id,
+                                "search_kwargs": search_kwargs
+                            }
+                        }
+                    ):
+                        if await request.is_disconnected():
+                            log.warning(f"/rag client disconnected for '{session_id}'")
+                            break
 
-                            # Hide user_id from metadata on UI
-                            if "user_id" in document.metadata:
-                                if document.metadata["user_id"] == "public":
-                                    document.metadata["isPublicDocument"] = True
-                                else:
-                                    document.metadata["isPublicDocument"] = False
-                                document.metadata.pop("user_id")
-
+                        # there is answer/input/context
+                        if "answer" in chunk:
+                            log.debug(f"/rag Answer chunk: {chunk['answer'][:100] if isinstance(chunk['answer'], str) else chunk['answer']}")
                             yield json.dumps({
-                                "type": "context",
-                                "data": {
-                                    "metadata": document.metadata,
-                                    "page_content": document.page_content
-                                }
+                                "type": "content",
+                                "data": chunk["answer"]
                             }) + "\n"
+
+                        elif "context" in chunk:
+                            log.info(f"/rag Retrieved {len(chunk['context'])} context documents")
+                            for i, document in enumerate(chunk["context"]):
+                                log.info(f"/rag   Context Doc {i+1}: {document.page_content[:100]}...")
+                                if await request.is_disconnected():
+                                    log.warning(f"/rag client disconnected for '{session_id}'")
+                                    break
+
+                                # Hide user_id from metadata on UI
+                                if "user_id" in document.metadata:
+                                    if document.metadata["user_id"] == "public":
+                                        document.metadata["isPublicDocument"] = True
+                                    else:
+                                        document.metadata["isPublicDocument"] = False
+                                    document.metadata.pop("user_id")
+
+                                yield json.dumps({
+                                    "type": "context",
+                                    "data": {
+                                        "metadata": document.metadata,
+                                        "page_content": document.page_content
+                                    }
+                                }) + "\n"
 
             log.info(f"/rag Streaming completed for '{session_id}'")
 

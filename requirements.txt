@@ -7,12 +7,21 @@ langchain-text-splitters==0.3.8
 PyMuPDF==1.25.5
 unstructured==0.17.2
 Markdown==3.8
-faiss-cpu==1.11.0
+# faiss-cpu==1.11.0  # removed (migrated to Qdrant)
 fastapi==0.115.12
 uvicorn==0.34.2
 python-multipart==0.0.20
+qdrant-client==1.12.1
 pytz==2025.2
 bcrypt==4.3.0
+psycopg2-binary==2.9.9
+redis==5.2.1
+
+# Retrieval Enhancements:
+voyageai==0.3.3  # Voyage AI Rerank 2.5 for re-ranking
+fastembed>=0.4.0  # FastEmbed with SparseTextEmbedding for SPLADE sparse vectors
+sentence-transformers==3.0.1  # SPLADE-v3 sparse embeddings and other transformers
+# DBSF and MMR are handled by Qdrant native Query API (v1.10.0+)
 
 # Frontend Req: If you want to serve streamlit app:
 pytz==2025.2

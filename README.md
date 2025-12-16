@@ -1,12 +1,8 @@
 # `RAG with Gemma-3`
 
-This project is a **modular Retrieval-Augmented Generation (RAG) system** built with Google DeepMind's - **Gemma 3** served locally using Ollama. It allows users to upload documents (PDF, TXT, Markdown etc.), and then chat with the content using natural language queries - all processed through a local setup for privacy and full control.
+This project is a **modular Retrieval-Augmented Generation (RAG) system** built with **Gemma 3** LLM (served locally via Ollama) and **Qdrant** vector database. It allows users to upload documents (PDF, TXT, Markdown, etc.) and chat with their content using natural language queries - all processed through a local setup for privacy and full control.
 
-Designed with modularity and performance in mind, the system handles end-to-end workflows including file ingestion, vector embedding, history summarization, document retrieval, context-aware response generation, and streaming replies to a frontend. It supports multi-file embeddings per user, persistent session history and document storage, and offers live document previews - making it complete end-to-end RAG pipeline useful for educational, or personal assistants.
-
-<!-- Check out the project deployment on [Hugging Face Spaces](https://huggingface.co/spaces/bhushan-songire/rag-with-gemma3) for a live demo. -->
-Check out the live project deployment: [![HuggingFace Space Deployment Link](https://img.shields.io/badge/bhushan--songire/-rag--with--gemma3-ff8800.svg?logo=huggingface)](https://huggingface.co/spaces/bhushan-songire/rag-with-gemma3)
-
+Designed with modularity and performance in mind, the system handles end-to-end workflows including file ingestion with hybrid embeddings (dense + sparse SPLADE vectors), vector storage in Qdrant, history summarization, document retrieval, context-aware response generation, and streaming replies to a frontend. It supports multi-file embeddings per user, persistent session history via Redis, document storage in PostgreSQL, and offers live document previews - making it a complete end-to-end RAG pipeline useful for educational and personal assistants.
 
 
 # 📃 Index:
@@ -19,17 +15,15 @@ Check out the live project deployment: [![HuggingFace Space Deployment Link](htt
 - [Installation](#%EF%B8%8F-installation)
     - [Virtual Environment](#virtual-environment)
     - [Docker](#-docker)
-        1. [Development](#development)
-        1. [Deployment](#deployment)
-- [Extra Measures](#%EF%B8%8F-extra-measures)
-    - [Mount Storage](#mount-storage)
-    - [Removing all the cache files](#removing-all-the-cache-files)
-    - [Using Host Machine's Ollama on Linux](#using-host-machines-ollama-on-linux)
-    - [Ollama Models](#ollama-models) 
+        1. [Using Docker Compose](#using-docker-compose)
+        1. [Manual Docker Setup](#manual-docker-setup)
+- [Configuration](#-configuration)
+    - [Environment Variables](#environment-variables)
+    - [Ollama Models](#ollama-models)
+- [Troubleshooting](#-troubleshooting)
 - [Future Work](#-future-work)
 - [Contributions](#-contributions)
 - [License](#-license)
-- [Contact](#-contact)
 
 
 # 🎯 Project Details:
@@ -37,270 +31,275 @@ Check out the live project deployment: [![HuggingFace Space Deployment Link](htt
 The core objective of this project is to build a **robust RAG system** with modern components and clean modular design and proper error handling.
 
 ## Methodology
-1. Make a responsive UI in `Streamlit` allowing user to upload documents, get previews to ensure correctness and interact with them.
-1. Use `FastAPI` to build a backend that handles file uploads, document processing, user authentication and streaming LLM responses.
-1. Code modular `LLM System` using `LangChain` components for chains, embeddings, retrievers, vector storage, history management, output parsers and overall LLM-Orchestration.
-1. Integrate locally hosted `Gemma-3` LLM using `Ollama` for local inference.
-1. Use `FAISS` for efficient vector storage, similarity search and user specific document storage and retrieval.
-1. Use `SQLite-3` for user management, authentication, and data control.
-1. Create a dynamic `Docker` setup for easy deployment as either a development or deployment environment.
-1. Deploy project on `Hugging Face Spaces` for easy access and demonstration.
+1. Build a responsive UI in `Streamlit` allowing users to upload documents, get previews to ensure correctness, and interact with them.
+2. Use `FastAPI` to build a backend that handles file uploads, document processing, and streaming LLM responses.
+3. Implement modular `LLM System` using `LangChain` components for chains, embeddings, retrievers, vector storage, history management, and overall LLM orchestration.
+4. Integrate locally hosted `Gemma-3` LLM via `Ollama` for local inference with no API keys required.
+5. Implement **hybrid embeddings**: dense vectors using `mxbai-embed-large` and sparse vectors using **SPLADE** for improved retrieval accuracy.
+6. Use `Qdrant` for efficient vector storage, hybrid search, and user-specific document storage and retrieval.
+7. Use `PostgreSQL` for user management, authentication, and data control.
+8. Use `Redis` for persistent session history and chat context management.
+9. Create a unified `Docker` setup supporting both development and production environments with `docker-compose` for orchestration.
+10. Enforce context-aware responses with system prompts that prioritize document content over LLM training knowledge.
 
-> [!Note]  
-> Due to hosting limitations of Gemma3, the Hugging Face Space deployment uses `Google Gemini-2.0-Flash-Lite` as the LLM backend.
-
-
-## RAG Samples:
-
-- Q: Highest possible grade:
-    [![RAG Sample Q1](./Docs/5_Doc_Retr_Que.png)](./Docs/5_Doc_Retr_Que.png)
-    [![RAG Sample A1](./Docs/5_Doc_Retr_Ans.png)](./Docs/5_Doc_Retr_Ans.png)
-- Q: Formatted Output:
-    [![RAG Sample Q2](./Docs/2.3_Sample_Ans.png)](./Docs/2.3_Sample_Ans.png)
 
 ## Features
 
-- User Authentication:
-    + Authenticate users using `SQLite-3` database and `bcrypt` based password hashing and salt.
-        [![User Registration Screenshot](./Docs/1_Auth.png)](./Docs/1_Auth.png)
-    + Store user data securely and also auto clear stale sessions data.
+- **Context-Aware RAG**: 
+    + System enforces responses based exclusively on document context, preventing hallucinations and ensuring factual accuracy.
+    + Uses hybrid retrieval combining dense DBSF search with sparse SPLADE vectors for superior document matching.
 
-- UI and User Controls:
-    + Build a responsive UI using `Streamlit` app. Provide a chat interface for users to ask questions about their documents, get file previews and receive context-aware responses.
-        [![User File Preview](./Docs/2.2_Preview.png)](./Docs/2.2_Preview.png)
-    + User uploaded files and corresponding data are tracked in a **SQLite-3** database.
-    + Allow users to delete their uploaded documents, and manage their session history.
-        [![User Chat Screenshot](./Docs/3_Clear_Chat_Hist.png)](./Docs/3_Clear_Chat_Hist.png)
-    + Note: Files previews are cached for 10 minutes, so even after deletion, the file preview might be available for that duration. 
-    + Also works with FastAPI SSE to show real-time responses from the LLM and retrieved documents and metadata for verification.
-        [![Source Documents Screenshot](./Docs/7_Metadata_n_Src.png)](./Docs/7_Metadata_n_Src.png)
+- **User Authentication & Data Management**:
+    + Authenticate users via `PostgreSQL` database with secure password management.
+    + Track user uploaded files and corresponding metadata in database.
+    + Persistent session history stored in `Redis` for context-aware interactions.
+    + Allow users to delete documents and manage session history.
 
+- **Advanced Document Ingestion**:
+    + Support multi-file uploads per user with automatic processing.
+    + Generate **hybrid embeddings**: dense vectors (1024-dim) and sparse vectors (SPLADE).
+    + Store documents in `Qdrant` with full metadata (source, page number, timestamp).
+    + Display live document previews with 10-minute caching.
 
-- User wise document management:
-    + Support **multi-file embeddings** per user, allowing users to upload multiple documents and retrieve relevant information based on their queries.
-    + Some documents can also be added as ***public*** documents, which can be accessed by all users. (like shared rulebooks or manuals or documentation)
+- **Intelligent Retrieval**:
+    + Hybrid retriever combining dense similarity search and sparse BM25-style search.
+    + Density-Biased Fusion (DBSF) score fusion for optimal ranking.
+    + Maximal Marginal Relevance (MMR) for result diversity.
+    + Efficient vector storage and retrieval via Qdrant.
 
-- Embeddings, Vector Storage and Retrieval:
-    + Implement **vector embeddings** using `LangChain` components to convert documents into vector representations.
-    + Open source `mxbai-embed-large` model is used for generating embeddings, which is a lightweight and efficient embedding model.
-    + Use `FAISS` for efficient vector storage and retrieval of user-specific + public documents.
-    + Integrate **similarity search** and document retrieval with Gemma-based LLM responses.
+- **Streaming LLM Responses**:
+    + Built-in **FastAPI** backend with Server-Sent Events (SSE) for real-time streaming.
+    + Stream LLM responses chunk-by-chunk for responsive UX.
+    + Display retrieved documents and metadata for verification of responses.
 
-- FastAPI Backend:
-    + Build a **FastAPI** backend to handle file uploads, document processing, user authentication, and streaming LLM responses.
-    + Integrate with 'LLM System' module to handle LLM tasks.
-    + Provide status updates to UI for long running tasks:
-        [![Step By Step Updates Screenshot](./Docs/5_Doc_Retr_Que.png)](./Docs/5_Doc_Retr_Que.png)
-    + Implement **Server-Sent Events (`SSE`)** for real-time streaming of LLM responses to the frontend with ***NDJSON*** format for data transfer.
-        [![SSE Streaming Screenshot](./Docs/6_Streaming_Resp.png)](./Docs/6_Streaming_Resp.png)
-    + Provide UI with retrieved documents and metadata for verification of responses.
+- **LLM System Architecture**:
+    + Modular design using `LangChain` for:
+        - **Document Ingestion**: Load and chunk documents efficiently.
+        - **Vector Embedding**: Dense embeddings via `mxbai-embed-large` and sparse via SPLADE.
+        - **History Management**: Summarize and manage session history in Redis.
+        - **Document Retrieval**: Hybrid search combining dense and sparse vectors.
+        - **Response Generation**: Context-aware responses from Gemma-3 via Ollama.
+        - **Tracing**: Optional LangSmith integration for debugging and monitoring.
 
-- LLM System:
-    + Modular `LLM System` using `LangChain` components for:
-        1. **Document Ingestion**: Load files and process them into document chunks.
-        1. **Vector Embedding**: Convert documents into vector representations.
-        1. **History Summarization**: Summarize user session history for querying vector embeddings and retrieving relevant documents.
-        1. **Document Retrieval**: Fetch relevant documents based on standalone query and user's metadata filters.
-        1. **History Management**: Maintain session history for context-aware interactions.
-        1. **Response Generation**: Generate context-aware responses using the LLM.
-        1. **Tracing**: Enable tracing of LLM interactions using `LangSmith` for debugging and monitoring LLM interactions.
-        1. **Models**: Use `Ollama` to run the **Gemma-3** LLM and **mxbai embeddings** locally for inference, ensuring low latency and privacy.
-
-- Dockerization:
-    + Create a dynamic `Docker` setup for easy deployment as either a development or deployment environment.
-    + Use [`Dockerfile`](./Dockerfile) to manage both [FastAPI](./server/server.py) and [Streamlit](./app.py) server in a single container (mainly due to Hugging Face Spaces limitations).
+- **Unified Containerization**:
+    + Single `Dockerfile` supporting both development and production environments.
+    + `docker-compose.yml` orchestrates all services: Qdrant, Ollama, PostgreSQL, Redis, FastAPI, Streamlit.
+    + Easy environment switching with environment variables (no separate deploy files).
+    + Production-ready with all services networked and persistent volumes.
 
 
 # 🧑‍💻 Tech Stack
-- 🦜️ LangChain
-- ⚡ FastAPI
-- 👑 Streamlit
-- 🐋 Docker
-- 🦙 Ollama
-    - Gemma-3
-    - mxbai-embed-large
-- ♾️ FAISS
-- 🪶 SQLite-3
-- 🛠️ LangSmith
-- 🔐 bcrypt
+- 🦜 **LangChain** - LLM orchestration and chain management
+- ⚡ **FastAPI** - Backend API with SSE streaming
+- 👑 **Streamlit** - Frontend UI
+- 🐋 **Docker & Docker Compose** - Containerization and orchestration
+- 🦙 **Ollama** - Local LLM serving
+    - **Gemma 3** (1B) - Primary LLM for responses
+    - **mxbai-embed-large** - Dense embeddings (1024-dim)
+    - **SPLADE** (via FastEmbed) - Sparse embeddings
+- ♾️ **Qdrant** - Vector database with hybrid search support
+- 🐘 **PostgreSQL** - User and document metadata storage
+- 🔴 **Redis** - Session history and chat context caching
+- 🛠️ **LangSmith** - Optional LLM tracing and debugging
+- 🔐 **bcrypt** - Password hashing and security
 
 
 # 🛠️ Installation
-There are two ways to run this project - either directly using a [**Virtual Environment**](#virtual-environment) or using [**Dockerfile**](#-docker).
+There are two ways to run this project: using [**Docker Compose**](#using-docker-compose) (recommended) or using a [**Virtual Environment**](#virtual-environment).
 
-## Virtual Environment
+## Docker Compose (Recommended)
+
+This is the easiest way to run the entire system with all required services.
+
+### Prerequisites:
+- Docker and Docker Compose installed
+- Ollama running with models pre-pulled:
+  ```bash
+  ollama pull gemma3:1b
+  ollama pull mxbai-embed-large:latest
+  ```
+
+### Steps:
 
 1. Clone the repository:
     ```bash
-    git clone --depth 1 https://github.com/Bbs1412/rag-with-gemma3.git
+    git clone https://github.com/Bbs1412/rag-with-gemma3.git
+    cd rag-with-gemma3
     ```
 
-1. Create virtual environment  and install dependencies:
+2. Start all services with docker-compose:
     ```bash
-    # Create environment:
+    docker-compose up -d
+    ```
+
+3. Access the applications:
+    - **Streamlit Frontend**: http://localhost:8501
+    - **FastAPI Backend**: http://localhost:8000
+    - **FastAPI Docs**: http://localhost:8000/docs
+    - **Qdrant Console**: http://localhost:6333/dashboard
+
+4. Stop services:
+    ```bash
+    docker-compose down
+    ```
+
+### Manual Docker Setup
+
+If you prefer to build and run containers manually:
+
+1. **Build the Docker image**:
+    ```bash
+    docker build -t chat-with-data:latest .
+    ```
+
+2. **Start infrastructure services** (Qdrant, Ollama, PostgreSQL, Redis):
+    ```bash
+    docker-compose up -d qdrant ollama postgres redis
+    ```
+
+3. **Run the application container**:
+    ```bash
+    docker run -d --name chat-app \
+        --network chat-network \
+        -e QDRANT_HOST=qdrant \
+        -e REDIS_HOST=chat-redis \
+        -e POSTGRES_HOST=chat-postgres \
+        -e POSTGRES_USER=postgres \
+        -e POSTGRES_PASSWORD=postgres \
+        -e POSTGRES_DB=chat_db \
+        -p 8000:8000 \
+        -p 8501:8501 \
+        chat-with-data:latest
+    ```
+
+## Virtual Environment
+
+For local development without Docker:
+
+1. Clone the repository:
+    ```bash
+    git clone https://github.com/Bbs1412/rag-with-gemma3.git
+    cd rag-with-gemma3
+    ```
+
+2. Create and activate a virtual environment:
+    ```bash
+    # Create environment
     python -m venv venv
     
-    # Activate environment:
-    source venv/bin/activate  # On Linux/Mac
+    # Activate environment
+    source venv/bin/activate  # On Linux/macOS
     # or
     venv\Scripts\activate  # On Windows
 
-    # Install dependencies:
+    # Install dependencies
     pip install -r requirements.txt
     ```
 
-1. (Optional) If you want to use LangSmith tracing, create a `.env` file in the `server` directory and add these credentials:
-    ```ini
-    # ./server/.env
-    LANGCHAIN_TRACING_V2=true
-    LANGCHAIN_ENDPOINT="https://api.smith.langchain.com"
-    LANGCHAIN_API_KEY="<paste_your_api_key_here>"
-    LANGCHAIN_PROJECT="rag-with-gemma3"
+3. Ensure Ollama is running with required models:
+    ```bash
+    ollama serve  # In a separate terminal
     ```
 
-1. Start the FastAPI server:
+4. (Optional) Configure LangSmith tracing by creating `.env` in the `server` directory:
+    ```ini
+    LANGCHAIN_TRACING_V2=true
+    LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+    LANGCHAIN_API_KEY=<your_api_key>
+    LANGCHAIN_PROJECT=rag-with-gemma3
+    ```
+
+5. Start the FastAPI server:
     ```bash
     cd server
-    uvicorn server:app
-    # For development with hot-reloading
-    # uvicorn server:app --reload --port 8000
+    uvicorn server:app --reload --port 8000
     ```
 
-1. Start the Streamlit server:
+6. In another terminal, start the Streamlit app:
     ```bash
     cd ..
     streamlit run app.py
     ```
 
-1. You can now access these servers:
-    - FastAPI backend at [http://localhost:8000](http://localhost:8000)
-    - Streamlit frontend at [http://localhost:8501](http://localhost:8501)
-    - FastAPI Swagger UI at [http://localhost:8000/docs](http://localhost:8000/docs)
-    
-
-## 🐋 Docker
-Dockerfile is coded dynamically to support both development and deployment environments.
-
-1. Development:
-    - Project uses `http://host.docker.internal:11434` as the Ollama server for local inference.
-    - This is to ensure that existing Ollama models in the host machine are accessible from the docker container.
-    - In this env, all three ports {8000:FastAPI, 8501:Streamlit, 11434:Ollama} are exposed for easy access.
-1. Deployment:
-    - Project uses Google `Gemini-2.0-Flash-Lite` as the LLM and `text-embedding-004` as embedding model.
-    - Primarily due to deployment and API limitations of Gemma3 model.
-    - In this env, only port 7860 is exposed for the Streamlit frontend.
-
-### `Development:`
-1. Build the Docker image:
-    ```bash
-    docker build -t BBS/rag-with-gemma3:dev --build-arg ENV_TYPE=dev .
-    ```
-
-1. Create a Docker container:
-    ```bash
-    docker create --name rag-gemma-cont-dev \ 
-        -e ENV_TYPE=dev \
-        # Below 4 are optional env-vars for LangSmith tracing \
-        -e LANGCHAIN_TRACING_V2=true \
-        -e LANGCHAIN_ENDPOINT="https://api.smith.langchain.com" \
-        -e LANGCHAIN_API_KEY="<paste_your_api_key_here>" \
-        -e LANGCHAIN_PROJECT="rag-with-gemma3" \
-        # Port mapping for FastAPI, Streamlit, and Ollama \
-        -p 8000:8000 -p 8501:8501 -p 11434:11434 \
-        BBS/rag-with-gemma3:dev
-    ```
-
-1. Start the Docker container:
-    ```bash
-    docker start -a rag-gemma-cont-dev
-    ```
-
-1. You can now access these servers:
-    - FastAPI backend at [http://localhost:8000](http://localhost:8000)
-    - Streamlit frontend at [http://localhost:8501](http://localhost:8501)
-
-### `Deployment:`
-1. Build the Docker image:
-    ```bash
-    docker build -t BBS/rag-with-gemma3:prod --build-arg ENV_TYPE=deploy .
-    ```
-
-1. Create a Docker container:
-    ```bash
-    docker create --name rag-gemma-cont-prod \
-        -e ENV_TYPE=deploy \
-        # Below 4 are optional env-vars for LangSmith tracing \
-        -e LANGCHAIN_TRACING_V2=true \
-        -e LANGCHAIN_ENDPOINT="https://api.smith.langchain.com" \
-        -e LANGCHAIN_API_KEY="<paste_your_api_key_here>" \
-        -e LANGCHAIN_PROJECT=deployed-rag-gemma3 \
-        # This is necessary env variable \
-        -e GOOGLE_API_KEY="<paste_your_google_api_key_here>" \
-        # Port mapping, only 7860 is exposed \
-        -p 7860:7860 \
-        BBS/rag-with-gemma3:prod
-    ```
-
-1. Start the Docker container:
-    ```bash
-    docker start -a rag-gemma-cont-prod
-    ```
-
-1. You can now access the Project at [http://localhost:7860](http://localhost:7860)
+1. Access the applications:
+    - **Streamlit Frontend**: http://localhost:8501
+    - **FastAPI Backend**: http://localhost:8000
+    - **FastAPI Docs**: http://localhost:8000/docs
 
 
-# 🛡️ Extra Measures
+# ⚙️ Configuration
 
-## Mount Storage:
-- To ensure that user data is persistent and not lost when the container is stopped or removed, you can mount a local directory to the container's storage directory.
-- You can do this by adding the `-v` flag to the `docker create` command:
--   ```bash
-    docker create --name rag-gemma-cont-dev \
-        -e ENV_TYPE=dev \
-        -v /path/to/local/storage:/app/storage \
-        # Other flags...
-    ```
+## Environment Variables
 
-## Removing all the cache files:
-- Linux:
-    ```bash
-    find . -type d -name "__pycache__" -exec rm -r {} +
-    ```
-- Windows:
-    ```powershell
-    Get-ChildItem -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
-    ```
+The system reads the following environment variables for configuration:
 
-## Using Linux Host Machine's Ollama on container:
-- The Ollama server is configured to run on `http://host.docker.internal:11434` by default, which works out-of-the-box on Windows and macOS.
-- On Linux, Docker does not support ***host.docker.internal*** automatically.
-- To fix this, add the following flag in the docker create command:
-    ```bash
-    --add-host=host.docker.internal:host-gateway
-    ```
+### Qdrant Configuration
+- `QDRANT_HOST` (default: `localhost`) - Qdrant server hostname
+- `QDRANT_PORT` (default: `6333`) - Qdrant server port
 
+### Redis Configuration
+- `REDIS_HOST` (default: `localhost`) - Redis server hostname
+- `REDIS_PORT` (default: `6379`) - Redis server port
 
-## Ollama Models:
-- To change LLM or Embedding model:
-    + Go to [`./server/llm_system/config.py`](./server/llm_system/config.py) file.
-    + It is central configuration file for the project.
-    + Any constant can be changed there to be used in the project.
-    + There are two diff models saved in config, but, I have used same model for response generation and summarization, if you want to change it, you can update the summarization model in `server.py` (≈ line 63)
+### PostgreSQL Configuration
+- `POSTGRES_HOST` (default: `localhost`) - PostgreSQL server hostname
+- `POSTGRES_PORT` (default: `5432`) - PostgreSQL server port
+- `POSTGRES_USER` (default: `postgres`) - PostgreSQL username
+- `POSTGRES_PASSWORD` (default: `postgres`) - PostgreSQL password
+- `POSTGRES_DB` (default: `chat_db`) - PostgreSQL database name
 
-- To change inference device:
-    + I have configured the LLM model to work on GPU and embedding model to work on CPU. 
-    - If you want to use GPU for embeddings too, you can change the **num_gpu** parameter in [`./server/llm_system/core/database.py`](./server/llm_system/core/database.py) (≈ line 58).
-    + 0 means 100% CPU, -1 means 100% GPU, and any other number specifies particular number of model's layers to be offloaded on GPU. 
-    + Delete this parameter if you are unsure of these values and your hardware capabilities. Ollama dynamically offloads layers to GPU based on available resources.
+### LangSmith Tracing (Optional)
+- `LANGCHAIN_TRACING_V2` - Enable LangSmith tracing
+- `LANGCHAIN_ENDPOINT` - LangSmith API endpoint
+- `LANGCHAIN_API_KEY` - LangSmith API key
+- `LANGCHAIN_PROJECT` - Project name for tracing
 
-> [!Note]  
-> If you are using docker, make sure to do these changes in [`./docker/dev_*`](./docker/) files.
+## Ollama Models
+
+To change LLM or Embedding models, edit [`./server/llm_system/config.py`](./server/llm_system/config.py):
+
+- **LLM Model**: `LLM_MODEL` - Currently `gemma3:1b`
+- **Embedding Model**: `EMBEDDING_MODEL` - Currently `mxbai-embed-large:latest`
+- **Max Context**: `MAX_CONTEXT_LENGTH` - Currently `2048` tokens
+- **Temperature**: `LLM_TEMPERATURE` - Currently `0.7`
+
+### Inference Device Configuration
+
+In [`./server/llm_system/core/database.py`](./server/llm_system/core/database.py):
+- Change `num_gpu` parameter to control GPU offloading:
+  - `0` = 100% CPU
+  - `-1` = 100% GPU
+  - `n` = Offload `n` layers to GPU
+- Ollama automatically manages GPU if the parameter is omitted
+
+# 🔧 Troubleshooting
+
+## Redis Connection Issues
+- **Error**: `'NoneType' object has no attribute 'lrange'`
+- **Solution**: Ensure `REDIS_HOST` environment variable is set correctly (e.g., `chat-redis` in Docker)
+
+## Ollama Connection Issues
+- **Error**: Connection refused to `http://ollama:11434`
+- **Solution**: Ensure Ollama is running and accessible. In docker-compose, check that the `ollama` service is running: `docker-compose ps`
+
+## Qdrant Connection Issues
+- **Error**: Connection refused to Qdrant
+- **Solution**: Verify `QDRANT_HOST` and `QDRANT_PORT` environment variables. In docker-compose, the hostname is `qdrant` not `localhost`
+
+## Streamlit Not Loading
+- **Solution**: Clear Streamlit cache with: `streamlit cache clear`
+
+## Port Already in Use
+- **Solution**: Either stop the conflicting service or change ports in `docker-compose.yml`
 
 
 # 🚀 Future Work
-- Add support for more file formats like DOCX, PPTX, etc.
-- Add web based loading so that any website can be loaded and queried on the go.
-- Create docker-compose setup for easier management of multiple containers.
+- Add support for more file formats (DOCX, PPTX, Excel, etc.)
+- Implement web-based URL loading for querying websites on-the-fly
+- Add multi-user collaboration features
+- Implement document versioning and change tracking
+- Add export functionality for conversations and summaries
+- Support for chunk-level relevance scoring and transparency
 
 
 # 🤝 Contributions 
@@ -312,5 +311,3 @@ Any contributions or suggestions are welcome!
 - See the [LICENSE](LICENSE) file for details.
 - You can use the code with proper credits to the author.
 
-# 📧 Contact
-- **Email -** [bhushanbsongire@gmail.com](mailto:bhushanbsongire@gmail.com)

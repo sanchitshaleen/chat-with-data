@@ -1,13 +1,15 @@
 """ Database Module for LLM System
-- Contains the `VectorDB` class to manage a vector database using FAISS and Ollama embeddings.
+- Contains the `VectorDB` class to manage a vector database using Qdrant and Ollama embeddings.
 - Provides methods to initialize the database, retrieve embeddings, and perform similarity searches.
 """
 
 import os
+import time
+import requests
 from typing import Tuple, Optional
 from langchain_core.documents import Document
 from langchain_ollama import OllamaEmbeddings
-from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import Qdrant
 from langchain_core.runnables import ConfigurableField
 
 # For type hinting
@@ -15,26 +17,26 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import VectorStore
 from langchain_core.vectorstores import VectorStoreRetriever
 
-# config:
-from llm_system.config import VECTOR_DB_PERSIST_DIR, VECTOR_DB_INDEX_NAME
-
 from logger import get_logger
+from .hybrid_retriever import HybridRetriever
+
 log = get_logger(name="core_database")
 
 
 class VectorDB:
-    """A class to manage the vector database using FAISS and Ollama embeddings.
+    """A class to manage the vector database using Qdrant and Ollama embeddings.
 
     Args:
         embed_model (str): The name of the Ollama embeddings model to use.
         retriever_num_docs (int): Number of documents to retrieve for similarity search.
         verify_connection (bool): Whether to verify the connection to the embeddings model.
-        persist_path (str, optional): Path to the persisted FAISS database. If None, a new DB is created.
-        index_name (str, optional): Name of the FAISS index file. Defaults to "index.faiss".
+        qdrant_host (str): Qdrant server host. Defaults to localhost.
+        qdrant_port (int): Qdrant server port. Defaults to 6333.
+        collection_name (str): Name of the Qdrant collection. Defaults to "documents".
 
     ## Functions:
         + `get_embeddings()`: Returns the Ollama embeddings model.
-        + `get_vector_store()`: Returns the FAISS vector store.
+        + `get_vector_store()`: Returns the Qdrant vector store.
         + `get_retriever()`: Returns the retriever configured for similarity search.
     """
 
@@ -42,20 +44,30 @@ class VectorDB:
         self, embed_model: str,
         retriever_num_docs: int = 5,
         verify_connection: bool = False,
-        persist_path: Optional[str] = VECTOR_DB_PERSIST_DIR,
-        index_name: Optional[str] = VECTOR_DB_INDEX_NAME
+        qdrant_host: str = "localhost",
+        qdrant_port: int = 6333,
+        collection_name: str = "documents"
     ):
-        self.persist_path: Optional[str] = persist_path
-        self.index_name: Optional[str] = index_name
+        self.retriever_num_docs = retriever_num_docs
+        self.qdrant_host = qdrant_host
+        self.qdrant_port = qdrant_port
+        self.collection_name = collection_name
+        self.qdrant_url = f"http://{qdrant_host}:{qdrant_port}"
 
         log.info(
-            f"Initializing VectorDB with embeddings='{embed_model}', path='{persist_path}', k={retriever_num_docs} docs."
+            f"Initializing VectorDB with Qdrant at '{self.qdrant_url}', "
+            f"embeddings='{embed_model}', collection='{collection_name}', k={retriever_num_docs} docs."
         )
 
-        # Here, I have configured the model to be loaded on CPU completely.
-        # Reason: Ollama keeps alternately loading and unloading the LLM/Emb model on GPU.
-        # Solution: Load the LLM on GPU and the Embedding model on CPU 100%.
-        self.embeddings = OllamaEmbeddings(model=embed_model, num_gpu=0, keep_alive=-1)
+        # Load embeddings from Ollama with Apple Silicon optimization
+        # On Apple Silicon (M1/M2/M3), Ollama automatically uses Metal for GPU acceleration
+        # Setting num_gpu=-1 tells Ollama to use all available GPU cores
+        self.embeddings = OllamaEmbeddings(
+            model=embed_model, 
+            num_gpu=-1,  # Use all available GPU cores on Apple Silicon
+            keep_alive=-1,
+            base_url="http://ollama:11434"  # Explicit base URL with longer timeout
+        )
 
         if verify_connection:
             try:
@@ -68,41 +80,77 @@ class VectorDB:
         else:
             log.warning(f"Embeddings '{embed_model}' initialized without connection verification.")
 
-        # Create a dummy document to initialize the FAISS vector store:
-        dummy_doc = Document(
-            page_content="Hello World!",
-            metadata={"user_id": "public", 'source': "test document"}
+        # Initialize Qdrant vector store with retry logic
+        max_retries = 10
+        retry_delay = 2
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Try to connect to existing collection first
+                try:
+                    self.db = Qdrant(
+                        url=self.qdrant_url,
+                        collection_name=self.collection_name,
+                        embeddings=self.embeddings,
+                        prefer_grpc=False,  # Use HTTP for better compatibility
+                    )
+                    log.info(f"Connected to existing Qdrant collection '{self.collection_name}'.")
+                except Exception as e:
+                    # Collection doesn't exist, need to create it
+                    # Create via HTTP API directly for better control
+                    log.info(f"Collection '{self.collection_name}' doesn't exist, creating empty one...")
+                    
+                    try:
+                        # Create empty collection via HTTP API
+                        create_url = f"{self.qdrant_url}/collections/{self.collection_name}"
+                        payload = {
+                            "vectors": {
+                                "size": 1024,  # mxbai-embed-large dimension
+                                "distance": "Cosine"
+                            }
+                        }
+                        response = requests.put(create_url, json=payload, timeout=10)
+                        if response.status_code == 200:
+                            log.info(f"Created empty Qdrant collection '{self.collection_name}' via HTTP API.")
+                            # Now connect to the created collection
+                            self.db = Qdrant(
+                                url=self.qdrant_url,
+                                collection_name=self.collection_name,
+                                embeddings=self.embeddings,
+                                prefer_grpc=False,
+                            )
+                        else:
+                            raise Exception(f"Failed to create collection: {response.text}")
+                    except Exception as create_error:
+                        log.warning(f"HTTP API creation failed, trying fallback with dummy doc: {create_error}")
+                        # Fallback: create with minimal dummy document if HTTP fails
+                        dummy_doc = Document(
+                            page_content=".",  # Single character to avoid empty content issues
+                            metadata={"user_id": "system", "source": "initialization", "skip_in_search": True}
+                        )
+                        self.db = Qdrant.from_documents(
+                            [dummy_doc],
+                            self.embeddings,
+                            url=self.qdrant_url,
+                            collection_name=self.collection_name,
+                            prefer_grpc=False,
+                        )
+                        log.info(f"Created Qdrant collection '{self.collection_name}' with minimal dummy doc.")
+                break
+            except Exception as e:
+                last_error = e
+                log.warning(f"Qdrant connection attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                else:
+                    log.error(f"Failed to initialize Qdrant after {max_retries} attempts")
+                    raise RuntimeError(f"Couldn't connect to Qdrant at {self.qdrant_url}") from last_error
+
+        # Create configurable retriever for runtime filter application
+        retriever = self.db.as_retriever(
+            search_kwargs={"k": retriever_num_docs}
         )
-
-        # Load faiss from disk:
-        if persist_path and index_name:
-            database_file = os.path.join(persist_path, index_name)
-
-            if not os.path.exists(database_file):
-                self.db = FAISS.from_documents([dummy_doc], embedding=self.embeddings)
-                self.db.save_local(persist_path)
-                log.info("Created a new FAISS vector store on disk with a dummy document.")
-            else:
-                log.info(f"Found existing FAISS vector store at '{database_file}'.")
-                self.db = FAISS.load_local(
-                    persist_path, self.embeddings, allow_dangerous_deserialization=True)
-
-        # Create one temp, in memory, FAISS vector store:
-        else:
-            self.db = FAISS.from_documents([dummy_doc], embedding=self.embeddings)
-            log.info("Created a new FAISS vector store in memory with a dummy document.")
-
-        # self.retriever = self.db.as_retriever(
-        #     search_type="similarity",
-        #     search_kwargs={"k": retriever_num_docs, "filter":{"user_id": "public"}},
-        # )
-        # log.info(f"Created retriever with k={retriever_num_docs}.")
-
-        # Simple retriever does not have way to pass some filters with rag_chain.invoke()
-        # Basically no way to pass args at runtime
-        # Hence, using configurable retriever:
-        # https://github.com/langchain-ai/langchain/issues/9195#issuecomment-2095196865
-        retriever = self.db.as_retriever()
         configurable_retriever = retriever.configurable_fields(
             search_kwargs=ConfigurableField(
                 id="search_kwargs",
@@ -111,60 +159,68 @@ class VectorDB:
             )
         )
 
-        # call it like this:
-        # configurable_retriever.invoke(
-        #     input="What is the Sun?",
-        #     config={"configurable": {
-        #         "search_kwargs": {
-        #             "k": 5,
-        #             "search_type": "similarity",
-        #             # And here comes the main thing:
-        #             "filter": {
-        #                 "$or": [
-        #                     {"user_id": "curious_cat"},
-        #                     {"user_id": "public"}
-        #                 ]
-        #             },
-        #         }
-        #     }}
-        # )
-
         self.retriever = configurable_retriever
-        log.info(f"Created configurable retriever.")
+        log.info(f"Created configurable retriever with k={retriever_num_docs}.")
 
     def get_embeddings(self) -> Embeddings:
         log.info("Returning the Embeddings model instance.")
         return self.embeddings
 
     def get_vector_store(self) -> VectorStore:
-        log.info("Returning the FAISS vector store instance.")
+        log.info("Returning the Qdrant vector store instance.")
         return self.db
 
     def get_retriever(self) -> VectorStoreRetriever:
         log.info("Returning the retriever for similarity search.")
-        return self.retriever # type: ignore[return-value]
+        log.info(f"Retriever search_kwargs: {self.retriever.search_kwargs if hasattr(self.retriever, 'search_kwargs') else 'N/A'}")
+        return self.retriever  # type: ignore[return-value]
 
-    def save_db_to_disk(self) -> bool:
-        """Saves the current vector store to disk if a persist path is set.
+    def get_hybrid_retriever(self, use_splade: bool = True, use_mmr: bool = True, use_reranking: bool = True) -> HybridRetriever:
+        """Get a hybrid retriever with SPLADE sparse vectors and Qdrant's native DBSF/MMR.
+        
+        Uses Qdrant's Query API with:
+        - Dense vector search (mxbai-embed-large)
+        - SPLADE sparse vectors for semantic keyword matching
+        - DBSF fusion combining dense and sparse results
+        - Native MMR for diversity
+        - RRF as alternative fusion method
+        - Voyage AI reranking as final step
+        
+        Args:
+            use_splade: Whether to generate and use SPLADE sparse vectors
+            use_mmr: Whether to use Qdrant's native MMR for diversity
+            use_reranking: Whether to use Voyage AI reranking
+        
         Returns:
-            bool: True if the vector store was saved successfully, False otherwise.
+            HybridRetriever instance with Qdrant Query API and SPLADE support
+            
+        References:
+            - Qdrant Hybrid Queries: https://qdrant.tech/documentation/concepts/hybrid-queries/
+            - SPLADE: https://qdrant.tech/documentation/fastembed/fastembed-splade/
+            - DBSF: https://arxiv.org/abs/2311.03099
         """
-
-        if self.persist_path and self.index_name:
-            try:
-                # Somehow, loading needs 'index.faiss', but saving needs only 'index'.
-                # index_base_name = self.index_name[:-6] if self.index_name.endswith('.faiss') else self.index_name
-                if self.index_name.endswith('.faiss'):
-                    index_base_name = self.index_name[:-6]
-                else:
-                    index_base_name = self.index_name
-
-                self.db.save_local(self.persist_path, index_name=index_base_name)
-                log.info(f"Vector store saved to disk at '{self.persist_path}/{self.index_name}'.")
-                return True
-            except Exception as e:
-                log.error(f"Failed to save vector store to disk: {e}")
-                return False
-        else:
-            log.warning("Skipped saving to disk as no persist path is set.")
-            return True
+        log.info(f"Creating hybrid retriever: SPLADE={use_splade}, MMR={use_mmr}, Reranking={use_reranking}")
+        log.info("Using Qdrant's native Query API for DBSF fusion with SPLADE sparse vectors")
+        
+        # Get Qdrant client from the vector store
+        qdrant_client = self.db.client
+        
+        # Import config for hybrid retrieval parameters
+        from llm_system.config import (
+            HYBRID_FUSION_METHOD, HYBRID_MMR_DIVERSITY
+        )
+        
+        # Create hybrid retriever with SPLADE support
+        hybrid = HybridRetriever(
+            qdrant_client=qdrant_client,
+            collection_name=self.collection_name,
+            embeddings=self.embeddings,
+            k=self.retriever_num_docs,
+            use_fusion=HYBRID_FUSION_METHOD,
+            use_splade=use_splade,  # Enable SPLADE sparse vectors
+            use_mmr=use_mmr,
+            use_reranking=use_reranking,
+            mmr_diversity=HYBRID_MMR_DIVERSITY
+        )
+        
+        return hybrid

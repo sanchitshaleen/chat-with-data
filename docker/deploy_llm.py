@@ -1,5 +1,5 @@
 # This file is copy of llm.py file under "../server/llm_system/core/llm.py"
-# Only change here is replacement of ChatOllama with ChatGoogleGenerativeAI
+# Production deployment using Gemma 2.5 from Ollama
 
 """LLM system module for managing language model interactions.
 This module provides functions to initialize and manage LLM models, and Parsers
@@ -10,7 +10,7 @@ from time import sleep
 from random import choice
 from typing import Generator
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.language_models.chat_models import BaseChatModel as T_LLM
 
@@ -33,8 +33,7 @@ def get_llm(model_name: str, context_size: int,
     """
 
     log.info(f"Initializing LLM(model={model_name}, ctx_size={context_size}, temp={temperature})")
-    # model = ChatGoogleGenerativeAI(model="gemma-3-27b-it", temperature=temperature)
-    model = ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite", temperature=temperature)
+    model = ChatOllama(model="gemma2.5", base_url="http://chat-ollama:11434", temperature=temperature)
 
     if verify_connection:
         try:

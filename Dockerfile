@@ -12,49 +12,35 @@ COPY app.py /streamlit/app.py
 COPY .streamlit/ /streamlit/.streamlit/
 COPY server/logger.py /streamlit/logger.py
 
-# Copy the files to replace:
-COPY docker/. /temp_files/
+# Copy requirements and entrypoint script
 COPY requirements.txt /temp_files/requirements.txt
-
-# Add entry point script
 COPY entrypoint.sh /entrypoint.sh
 
 # Create a non-root user and group
 RUN useradd -m appuser
 # Set permissions so appuser owns what it needs
 RUN chmod +x /entrypoint.sh && \
-    chown -R appuser:appuser /fastAPI /streamlit /temp_files /entrypoint.sh /tmp
+    chown -R appuser:appuser /fastAPI /streamlit /entrypoint.sh /tmp
 
 # Get the build arguments, with a default values
 ARG ENV_TYPE=deploy
 # Set the environment variable in the container
 ENV ENV_TYPE=${ENV_TYPE}
 
-
-# Check the env and replace the files accordingly
-RUN if [ "$ENV_TYPE" = "deploy" ]; then \
-        # Copy the deployment files
-        cp /temp_files/deploy_llm.py /fastAPI/llm_system/core/llm.py && \
-        cp /temp_files/deploy_database.py /fastAPI/llm_system/core/database.py; \
-    else \
-        # Copy the development files 
-        # (it is not from Docker Engine, it is inside the container to container only)
-        cp /temp_files/dev_llm.py /fastAPI/llm_system/core/llm.py && \
-        cp /temp_files/dev_database.py /fastAPI/llm_system/core/database.py; \
-    fi
+# Note: We use the main server/llm_system/core/llm.py which is already copied above
+# It uses ChatOllama with hardcoded "http://ollama:11434" which works for both dev and prod
 
 
 # Switch to non-root user
 USER appuser
-WORKDIR /temp_files
+WORKDIR /fastAPI
 ENV PATH="/home/appuser/.local/bin:${PATH}"
 
 # Install dependencies:
 RUN python -m pip install --upgrade pip
-RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
+RUN pip install --no-cache-dir --prefer-binary -r /temp_files/requirements.txt
 
-# Switch back to root briefly to clean up temp files
-WORKDIR /fastAPI
+# Switch back to root briefly to clean up
 USER root
 RUN rm -rf /temp_files && pip cache purge
 USER appuser
